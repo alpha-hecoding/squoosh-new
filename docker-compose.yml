@@ -1,0 +1,26 @@
+services:
+  squoosh:
+    image: squoosh-new:latest
+    build:
+      context: .
+    ports:
+      - "${SQUOOSH_PORT:-8080}:8080"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  squoosh-cli:
+    image: squoosh-new:cli
+    build:
+      context: .
+      dockerfile: Dockerfile.cli
+    profiles:
+      - cli
+    working_dir: /work
+    volumes:
+      - .:/work
+    ports:
+      - "${SQUOOSH_CLI_PORT:-8081}:8080"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true

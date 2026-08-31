@@ -1,0 +1,14 @@
+.git
+.github
+.husky
+.tmp
+.env
+.env.*
+!.env.example
+build
+node_modules
+npm-debug.log*
+Dockerfile*
+docker-compose*.yml
+docker-compose*.yaml
+README.md

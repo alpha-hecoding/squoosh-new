@@ -1,0 +1,37 @@
+FROM node:20.16.0-alpine AS builder
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+
+COPY codecs ./codecs
+COPY lib ./lib
+COPY src ./src
+COPY client-tsconfig.json generic-tsconfig.json static-build-tsconfig.json tsconfig.json worker-tsconfig.json ./
+COPY emscripten-types.d.ts missing-types.d.ts rollup.config.js ./
+RUN npm run build
+
+FROM node:16.20.2-alpine
+
+ARG SQUOOSH_CLI_VERSION=0.7.3
+
+RUN npm install --global "@squoosh/cli@${SQUOOSH_CLI_VERSION}" \
+  serve@14.2.6 \
+  && npm cache clean --force
+
+COPY --chmod=755 docker/squoosh-mozjpeg /usr/local/bin/squoosh-mozjpeg
+
+WORKDIR /app
+
+COPY serve.json ./
+COPY --from=builder /app/build ./build
+
+USER node
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
+
+CMD ["serve", "--listen=8080", "--config=/app/serve.json", "/app/build"]
