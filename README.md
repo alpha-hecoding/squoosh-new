@@ -90,7 +90,18 @@ docker compose exec squoosh-cli squoosh-cli --help
 docker compose exec squoosh-cli squoosh-cli --mozjpeg '{"quality":75}' input.png
 ```
 
-镜像还内置了 `squoosh-mozjpeg` 快捷命令，固定使用项目预设、输出到 `output` 目录，并为文件名添加 `-compressed` 后缀。可以一次传入多个文件：
+镜像还内置了快捷压缩命令：
+
+- `squoosh-auto`：按原格式智能分流压缩（JPG 走 MozJPEG、PNG 走 OxiPNG、WebP 走 WebP 等），遇到不支持或异常格式直接将原文件复制输出，输出到 `output` 目录并添加 `-compressed` 后缀。
+- `squoosh-mozjpeg`：将输入的所有图片统一转为 MozJPEG（`.jpg`）格式输出。
+
+使用 `squoosh-auto` 智能分流压缩：
+
+```sh
+docker compose exec squoosh-cli squoosh-auto input.png photo.jpg banner.webp icon.gif
+```
+
+使用 `squoosh-mozjpeg` 批量转换为 MozJPEG：
 
 ```sh
 docker compose exec squoosh-cli squoosh-mozjpeg input.png photo.jpg
@@ -102,14 +113,14 @@ docker compose exec squoosh-cli squoosh-mozjpeg input.png photo.jpg
 docker compose exec squoosh-cli sh -c 'squoosh-mozjpeg *.png'
 ```
 
-转换结果示例：`input.png` 会生成 `output/input-compressed.jpg`。
+转换结果示例：`input.png` 会生成 `output/input-compressed.jpg`；若使用 `squoosh-auto` 则生成 `output/input-compressed.png`。
 
 也可以不使用 Compose：
 
 ```sh
 docker build -f Dockerfile.cli -t squoosh-new:cli .
 docker run -d --name squoosh-new-cli -p 8081:8080 -v "$PWD:/work" squoosh-new:cli
-docker exec -w /work squoosh-new-cli squoosh-mozjpeg input.png photo.jpg
+docker exec -w /work squoosh-new-cli squoosh-auto input.png photo.jpg
 ```
 
 [squoosh]: https://squoosh.app

@@ -21,6 +21,7 @@ RUN npm install --global "@squoosh/cli@${SQUOOSH_CLI_VERSION}" \
   && npm cache clean --force
 
 COPY --chmod=755 docker/squoosh-mozjpeg /usr/local/bin/squoosh-mozjpeg
+COPY --chmod=755 docker/squoosh-auto /usr/local/bin/squoosh-auto
 
 WORKDIR /app
 

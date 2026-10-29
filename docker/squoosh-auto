@@ -1,0 +1,76 @@
+#!/bin/sh
+
+set -eu
+
+if [ "$#" -eq 0 ]; then
+  echo "用法: squoosh-auto <图片文件...>" >&2
+  exit 64
+fi
+
+export NODE_NO_WARNINGS=1
+
+OUTPUT_DIR="${OUTPUT_DIR:-output}"
+SUFFIX="${SUFFIX:--compressed}"
+
+mkdir -p "$OUTPUT_DIR"
+
+# 根据后缀压缩图片
+compress_file() {
+  input_file="$1"
+  input_ext="$2"
+
+  case "$input_ext" in
+    jpg|jpeg)
+      squoosh-cli --mozjpeg '{"quality":75}' --output-dir "$OUTPUT_DIR" --suffix="$SUFFIX" "$input_file"
+      ;;
+    png)
+      squoosh-cli --oxipng '{"level":2}' --output-dir "$OUTPUT_DIR" --suffix="$SUFFIX" "$input_file"
+      ;;
+    webp)
+      squoosh-cli --webp '{"quality":75}' --output-dir "$OUTPUT_DIR" --suffix="$SUFFIX" "$input_file"
+      ;;
+    avif)
+      squoosh-cli --avif '{"cqLevel":33}' --output-dir "$OUTPUT_DIR" --suffix="$SUFFIX" "$input_file"
+      ;;
+    jxl)
+      squoosh-cli --jxl '{"quality":75}' --output-dir "$OUTPUT_DIR" --suffix="$SUFFIX" "$input_file"
+      ;;
+    wp2)
+      squoosh-cli --wp2 '{"quality":75}' --output-dir "$OUTPUT_DIR" --suffix="$SUFFIX" "$input_file"
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+for file in "$@"; do
+  if [ ! -f "$file" ]; then
+    echo "警告: 文件不存在或不是普通文件: $file" >&2
+    continue
+  fi
+
+  filename="$(basename "$file")"
+  if [ "$filename" != "${filename%.*}" ]; then
+    name="${filename%.*}"
+    ext="${filename##*.}"
+    target_file="${OUTPUT_DIR}/${name}${SUFFIX}.${ext}"
+  else
+    name="$filename"
+    ext=""
+    target_file="${OUTPUT_DIR}/${name}${SUFFIX}"
+  fi
+
+  ext_lower="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+
+  ret=0
+  compress_file "$file" "$ext_lower" || ret=$?
+
+  if [ "$ret" -eq 2 ]; then
+    echo "提示: 不支持压缩的格式 [${ext:-无后缀}]，直接复制原文件 -> $target_file"
+    cp -f "$file" "$target_file"
+  elif [ "$ret" -ne 0 ]; then
+    echo "警告: 文件压缩失败 [$file]，回退复制原文件 -> $target_file" >&2
+    cp -f "$file" "$target_file"
+  fi
+done
