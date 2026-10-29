@@ -18,21 +18,27 @@ ARG SQUOOSH_CLI_VERSION=0.7.3
 
 RUN npm install --global "@squoosh/cli@${SQUOOSH_CLI_VERSION}" \
   serve@14.2.6 \
+  busboy@1.6.0 \
   && npm cache clean --force
+
+ENV NODE_PATH=/usr/local/lib/node_modules/@squoosh/cli/node_modules:/usr/local/lib/node_modules
 
 COPY --chmod=755 docker/squoosh-mozjpeg /usr/local/bin/squoosh-mozjpeg
 COPY --chmod=755 docker/squoosh-auto /usr/local/bin/squoosh-auto
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 WORKDIR /app
 
 COPY serve.json ./
 COPY --from=builder /app/build ./build
+COPY --chown=node:node server ./server
 
 USER node
 
-EXPOSE 8080
+EXPOSE 8080 8081
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/ && wget -q -O /dev/null http://127.0.0.1:8081/health || exit 1
 
-CMD ["serve", "--listen=8080", "--config=/app/serve.json", "/app/build"]
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["default"]

@@ -72,11 +72,49 @@ docker compose down
 docker compose build squoosh-cli
 ```
 
-启动 CLI 版 Web 服务，默认访问 `http://localhost:8081`：
+启动 CLI 版服务（同时暴露 8082 Web 服务与 8081 HTTP 压缩 API）：
 
 ```sh
 docker compose --profile cli up -d squoosh-cli
 ```
+
+### HTTP 图片压缩服务 (端口 8081)
+
+该镜像内置了纯内存、零落盘、支持并发调度的 HTTP 压缩服务（监听 `8081` 端口）。
+
+- **接口地址**：`POST http://localhost:8081/api/compress`（或 `/compress`）
+- **请求类型**：`multipart/form-data`
+- **支持参数**：
+  - `file`（必填）：待压缩图片文件流
+  - `mode`（可选）：`auto`（默认，按原格式压缩）或 `jpeg`（强制转为 MozJPEG 压缩）
+  - `type`（可选）：显式指定输入格式（如 `png`, `jpg`, `webp`）
+  - `quality`（可选）：画质（1~100），默认 75
+- **特性**：
+  - **纯内存零落盘**：文件流直接在内存中编解码，不产生任何磁盘文件，处理完由 GC 自动释放；
+  - **智能识别与直通**：对 GIF、BMP、SVG 等不支持的格式或解析异常自动原样直出（带有 `X-Compression-Status: bypassed` 响应头）；
+  - **默认限制**：单图上限 50MB（可通过环境变量 `MAX_FILE_SIZE_MB` 配置）。
+
+#### 调用示例
+
+1. 智能分流压缩 PNG（输出仍为 PNG）：
+
+```sh
+curl -F "file=@input.png" -F "mode=auto" http://localhost:8081/api/compress -o output.png
+```
+
+2. 将任意图片转为 JPEG 格式并压缩：
+
+```sh
+curl -F "file=@input.png" -F "mode=jpeg" -F "quality=80" http://localhost:8081/api/compress -o output.jpg
+```
+
+3. 查看健康检查与状态：
+
+```sh
+curl http://localhost:8081/health
+```
+
+### 命令行工具使用
 
 查看容器内 CLI 帮助：
 
