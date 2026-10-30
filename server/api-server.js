@@ -38,7 +38,7 @@ function createServer(options = {}) {
   const workerCount =
     options.workerCount ||
     parseInt(process.env.SQUOOSH_WORKERS, 10) ||
-    os.cpus().length;
+    Math.min(os.cpus().length, 4);
 
   const pool = new ImagePool(workerCount);
 
@@ -258,6 +258,14 @@ function createServer(options = {}) {
               result.bypassed ? 'bypassed' : 'success'
             }`,
           );
+
+          if (
+            global.gc &&
+            (process.memoryUsage().external > 256 * 1024 * 1024 ||
+              process.memoryUsage().heapUsed > 256 * 1024 * 1024)
+          ) {
+            global.gc();
+          }
         } catch (err) {
           console.error('处理图片请求异常:', err);
           if (!res.headersSent) {

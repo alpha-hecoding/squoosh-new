@@ -18,7 +18,7 @@ serve --listen=8080 --config=/app/serve.json /app/build &
 SERVE_PID=$!
 
 # 启动 8081 HTTP API 压缩服务
-NODE_ENV=production NODE_NO_WARNINGS=1 node /app/server/api-server.js &
+NODE_ENV=production NODE_NO_WARNINGS=1 node --expose-gc --max-old-space-size=4096 /app/server/api-server.js &
 API_PID=$!
 
 # 优雅终止处理
