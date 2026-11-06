@@ -82,6 +82,7 @@ function createServer(options = {}) {
           uptime: process.uptime(),
           workers: workerCount,
           maxFileSizeMb,
+          memoryUsage: process.memoryUsage(),
         }),
       );
       logAccess(200);
@@ -184,6 +185,10 @@ function createServer(options = {}) {
         if (res.headersSent) return;
 
         if (fileTooLarge) {
+          // 强行销毁请求流，防止客户端继续发送剩余大文件导致管道卡死
+          req.unpipe(bb);
+          if (!req.destroyed) req.destroy();
+
           res.statusCode = 413;
           res.setHeader('Content-Type', 'application/json; charset=utf-8');
           res.end(
@@ -209,18 +214,33 @@ function createServer(options = {}) {
           return;
         }
 
-        try {
-          const mode = fields.mode || 'auto';
-          const type = fields.type || '';
-          const quality = fields.quality
-            ? parseInt(fields.quality, 10)
-            : undefined;
+        const mode = fields.mode || 'auto';
+        const type = fields.type || '';
+        const quality = fields.quality
+          ? parseInt(fields.quality, 10)
+          : undefined;
 
-          const result = await compressImage(pool, fileBuffer, {
-            mode,
-            type,
-            quality,
-          });
+        // 设置压缩超时（默认 30 秒）
+        const compressTimeout =
+          parseInt(process.env.SQUOOSH_TIMEOUT || '30', 10) * 1000;
+
+        const compressPromise = compressImage(pool, fileBuffer, {
+          mode,
+          type,
+          quality,
+        });
+
+        let timeoutId;
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error(`压缩超时 (${compressTimeout / 1000}s)`)),
+            compressTimeout,
+          );
+        });
+
+        try {
+          const result = await Promise.race([compressPromise, timeoutPromise]);
+          clearTimeout(timeoutId); // ✅ 成功路径：立即清除定时器，防止触发 unhandled rejection
 
           res.statusCode = 200;
           res.setHeader('Content-Type', result.mime);
@@ -267,17 +287,36 @@ function createServer(options = {}) {
             global.gc();
           }
         } catch (err) {
+          clearTimeout(timeoutId); // ✅ 失败/超时路径：同样清除定时器
+          const isTimeout = err.message && err.message.includes('压缩超时');
+
+          if (isTimeout) {
+            // 后台幽灵任务静默兜底
+            compressPromise
+              .then((res) => {
+                if (res && res.data) res.data = null;
+              })
+              .catch((bgErr) => {
+                console.warn(
+                  '[squoosh-api] 超时后台任务最终异常退出:',
+                  bgErr.message,
+                );
+              });
+          }
+
           console.error('处理图片请求异常:', err);
           if (!res.headersSent) {
-            res.statusCode = 500;
+            res.statusCode = isTimeout ? 504 : 500;
             res.setHeader('Content-Type', 'application/json; charset=utf-8');
             res.end(
               JSON.stringify({
-                code: 'INTERNAL_ERROR',
-                message: 'Failed to process image compression',
+                code: isTimeout ? 'GATEWAY_TIMEOUT' : 'INTERNAL_ERROR',
+                message: isTimeout
+                  ? err.message
+                  : 'Failed to process image compression',
               }),
             );
-            logAccess(500, `Internal error: ${err.message}`);
+            logAccess(res.statusCode, `Error: ${err.message}`);
           }
         }
       });

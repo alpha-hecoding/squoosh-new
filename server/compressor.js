@@ -1,22 +1,24 @@
 'use strict';
 
 /**
+ * 图片压缩分流与路由模块
+ * 基于 Squoosh 编解码池，集成前置预校验与多格式转码路由
+ */
+
+const { validateImage } = require('./image-validator');
+
+/**
  * 二进制 Magic Bytes 探测图片格式
  * @param {Buffer} buffer
  * @returns {{ ext: string, mime: string, supported: boolean }}
  */
 function detectImageFormat(buffer) {
-  if (!buffer || buffer.length < 2) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 2) {
     return { ext: 'bin', mime: 'application/octet-stream', supported: false };
   }
 
-  // JPEG: FF D8 FF
-  if (
-    buffer.length >= 3 &&
-    buffer[0] === 0xff &&
-    buffer[1] === 0xd8 &&
-    buffer[2] === 0xff
-  ) {
+  // JPEG: FF D8
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) {
     return { ext: 'jpg', mime: 'image/jpeg', supported: true };
   }
 
@@ -38,27 +40,24 @@ function detectImageFormat(buffer) {
   // WebP: RIFF .... WEBP
   if (
     buffer.length >= 12 &&
-    buffer.slice(0, 4).toString('ascii') === 'RIFF' &&
-    buffer.slice(8, 12).toString('ascii') === 'WEBP'
+    buffer.toString('ascii', 0, 4) === 'RIFF' &&
+    buffer.toString('ascii', 8, 12) === 'WEBP'
   ) {
     return { ext: 'webp', mime: 'image/webp', supported: true };
   }
 
-  // GIF: GIF87a / GIF89a (不支持有损压缩编码器)
-  if (buffer.length >= 6 && buffer.slice(0, 3).toString('ascii') === 'GIF') {
+  // GIF: GIF87a / GIF89a (暂不支持有损压缩编码器)
+  if (buffer.length >= 6 && buffer.toString('ascii', 0, 3) === 'GIF') {
     return { ext: 'gif', mime: 'image/gif', supported: false };
   }
 
-  // BMP: BM (不支持)
-  if (buffer.length >= 2 && buffer[0] === 0x42 && buffer[1] === 0x4d) {
+  // BMP: BM
+  if (buffer[0] === 0x42 && buffer[1] === 0x4d) {
     return { ext: 'bmp', mime: 'image/bmp', supported: false };
   }
 
   // AVIF: .... ftypavif
-  if (
-    buffer.length >= 12 &&
-    buffer.slice(4, 12).toString('ascii') === 'ftypavif'
-  ) {
+  if (buffer.length >= 12 && buffer.toString('ascii', 4, 12) === 'ftypavif') {
     return { ext: 'avif', mime: 'image/avif', supported: true };
   }
 
@@ -71,8 +70,8 @@ function detectImageFormat(buffer) {
  * @param {Buffer} buffer
  * @param {object} options
  * @param {string} [options.mode='auto'] auto | jpeg | mozjpeg
- * @param {string} [options.type] 显式指定类型
- * @param {number} [options.quality=75]
+ * @param {string} [options.type] 显式指定类型输出
+ * @param {number} [options.quality=75] 压缩质量 (1-100)
  * @returns {Promise<{ data: Buffer, ext: string, mime: string, bypassed: boolean }>}
  */
 async function compressImage(imagePool, buffer, options = {}) {
@@ -85,7 +84,22 @@ async function compressImage(imagePool, buffer, options = {}) {
     : detected.ext;
   if (targetExt === 'jpeg') targetExt = 'jpg';
 
-  // 1. 若为强制 jpeg 模式
+  // 1. 统一前置预校验：拦截过小文件、不支持格式、损坏结构、超大图及 CMYK 色彩空间
+  const validation = validateImage(buffer);
+  if (!validation.valid) {
+    console.warn(
+      `图片校验未通过，直接直通原文件: ${validation.reason}`,
+      validation.info,
+    );
+    return {
+      data: buffer,
+      ext: detected.ext,
+      mime: detected.mime,
+      bypassed: true,
+    };
+  }
+
+  // 2. 强制 jpeg / mozjpeg 模式分流
   if (mode === 'jpeg' || mode === 'mozjpeg') {
     try {
       const image = imagePool.ingestImage(buffer);
@@ -109,11 +123,11 @@ async function compressImage(imagePool, buffer, options = {}) {
     }
   }
 
-  // 2. auto 模式：若探测为不支持格式，直接直通
+  // 3. auto 模式：若底层格式不在白名单内，直接直通
+  const supportedTargets = ['jpg', 'jpeg', 'png', 'webp', 'avif', 'jxl', 'wp2'];
   if (
     !detected.supported &&
-    (!options.type ||
-      !['jpg', 'jpeg', 'png', 'webp', 'avif', 'jxl', 'wp2'].includes(targetExt))
+    (!options.type || !supportedTargets.includes(targetExt))
   ) {
     return {
       data: buffer,
@@ -123,7 +137,7 @@ async function compressImage(imagePool, buffer, options = {}) {
     };
   }
 
-  // 3. auto 模式：按格式分流压缩
+  // 4. auto 模式：按目标格式分流编解码
   try {
     const image = imagePool.ingestImage(buffer);
     await image.decoded;
