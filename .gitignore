@@ -10,3 +10,7 @@ build
 src/features-worker/index.ts
 src/client/lazy-app/worker-bridge/meta.ts
 src/client/lazy-app/feature-meta/index.ts
+
+# 测试生成的图片
+test/test-images/
+test/test-output/
