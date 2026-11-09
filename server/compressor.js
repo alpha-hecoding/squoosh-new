@@ -7,6 +7,9 @@
 
 const { validateImage } = require('./image-validator');
 
+// 校验器能解析的输入格式；其余格式（如 AVIF）不做前置校验，交给编解码器判定
+const PREVALIDATED_EXTS = new Set(['jpg', 'jpeg', 'png', 'webp']);
+
 /**
  * 二进制 Magic Bytes 探测图片格式
  * @param {Buffer} buffer
@@ -84,19 +87,22 @@ async function compressImage(imagePool, buffer, options = {}) {
     : detected.ext;
   if (targetExt === 'jpeg') targetExt = 'jpg';
 
-  // 1. 统一前置预校验：拦截过小文件、不支持格式、损坏结构、超大图及 CMYK 色彩空间
-  const validation = validateImage(buffer);
-  if (!validation.valid) {
-    console.warn(
-      `图片校验未通过，直接直通原文件: ${validation.reason}`,
-      validation.info,
-    );
-    return {
-      data: buffer,
-      ext: detected.ext,
-      mime: detected.mime,
-      bypassed: true,
-    };
+  // 1. 前置预校验：拦截损坏结构、超大图及 CMYK 色彩空间。
+  //    仅覆盖校验器认识的格式，避免把 detectImageFormat 认为 supported 的格式（如 AVIF）静默拦死
+  if (PREVALIDATED_EXTS.has(detected.ext)) {
+    const validation = validateImage(buffer);
+    if (!validation.valid) {
+      console.warn(
+        `图片校验未通过，直接直通原文件: ${validation.reason}`,
+        validation.info,
+      );
+      return {
+        data: buffer,
+        ext: detected.ext,
+        mime: detected.mime,
+        bypassed: true,
+      };
+    }
   }
 
   // 2. 强制 jpeg / mozjpeg 模式分流

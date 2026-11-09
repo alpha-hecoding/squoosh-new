@@ -67,6 +67,101 @@ async function runTests() {
   assert.ok(iccRes.reason.includes('ICC Profile 标识为 CMYK'));
   console.log('  APP2 ICC Profile CMYK 正确拦截:', iccRes.reason);
 
+  // 1.3 测试 SOS 之后被截断的 JPEG（头部完整但缺 EOI）必须被拦截，
+  //     否则解码器会静默产出一张残缺图并回报 success
+  console.log('1.3 测试截断 JPEG（缺少 EOI）...');
+  const jpegHead = Buffer.from([
+    0xff,
+    0xd8, // SOI
+    0xff,
+    0xc0,
+    0x00,
+    0x0b,
+    0x08,
+    0x00,
+    0x64,
+    0x00,
+    0xc8,
+    0x03,
+    0x01,
+    0x11,
+    0x00, // SOF0 200x100
+    0xff,
+    0xda,
+    0x00,
+    0x0c,
+    0x03,
+    0x01,
+    0x00,
+    0x02,
+    0x11,
+    0x03,
+    0x11,
+    0x00,
+    0x3f,
+    0x00, // SOS
+  ]);
+  const truncatedJpeg = Buffer.concat([
+    jpegHead,
+    Buffer.from([0x01, 0x02, 0x03, 0x04]), // 熵数据被截断，无 EOI
+  ]);
+  const truncatedRes = validateImage(truncatedJpeg);
+  assert.strictEqual(truncatedRes.valid, false);
+  assert.ok(truncatedRes.reason.includes('缺少 EOI'));
+  const completeJpeg = Buffer.concat([
+    truncatedJpeg,
+    Buffer.from([0xff, 0xd9]), // 补上 EOI 后应当放行
+  ]);
+  const completeRes = validateImage(completeJpeg);
+  assert.strictEqual(completeRes.valid, true);
+  console.log('  截断 JPEG 正确拦截:', truncatedRes.reason);
+
+  // 1.4 测试默认像素上限（100MP）：120MP 拦截、64MP 放行
+  console.log('1.4 测试超大像素上限...');
+  const overLimitJpeg = Buffer.from([
+    0xff,
+    0xd8,
+    0xff,
+    0xc0,
+    0x00,
+    0x0b,
+    0x08,
+    0x2e,
+    0xe0,
+    0x27,
+    0x10,
+    0x03,
+    0x01,
+    0x11,
+    0x00,
+    0xff,
+    0xd9, // 12000 x 10000 = 120MP
+  ]);
+  const overLimitRes = validateImage(overLimitJpeg);
+  assert.strictEqual(overLimitRes.valid, false);
+  assert.ok(overLimitRes.reason.includes('尺寸过大'));
+  const withinLimitJpeg = Buffer.from([
+    0xff,
+    0xd8,
+    0xff,
+    0xc0,
+    0x00,
+    0x0b,
+    0x08,
+    0x1f,
+    0x40,
+    0x1f,
+    0x40,
+    0x03,
+    0x01,
+    0x11,
+    0x00,
+    0xff,
+    0xd9, // 8000 x 8000 = 64MP
+  ]);
+  assert.strictEqual(validateImage(withinLimitJpeg).valid, true);
+  console.log('  120MP 拦截 / 64MP 放行:', overLimitRes.reason);
+
   // 2. 测试 PNG 校验
   console.log('2. 测试 PNG 校验...');
   // PNG 最小完整结构: Signature (8B) + IHDR chunk (4+4+13+4 = 25B) = 33B

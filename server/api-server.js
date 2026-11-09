@@ -6,6 +6,9 @@ const busboy = require('busboy');
 const { ImagePool } = require('@squoosh/lib');
 const { compressImage } = require('./compressor');
 
+/** 压缩超时专用错误，用于与编码器自身异常区分（不靠 message 字符串匹配） */
+class CompressTimeoutError extends Error {}
+
 function formatBytes(bytes) {
   if (!bytes || bytes === 0) return '0B';
   const k = 1024;
@@ -40,6 +43,20 @@ function createServer(options = {}) {
     parseInt(process.env.SQUOOSH_WORKERS, 10) ||
     Math.min(os.cpus().length, 4);
 
+  // 超时秒数必须是正数，否则 Node 会把 NaN 当成 1ms 处理，导致所有请求秒变 504
+  const timeoutSeconds = (() => {
+    const raw = Number(process.env.SQUOOSH_TIMEOUT);
+    return Number.isFinite(raw) && raw > 0 ? raw : 30;
+  })();
+  const compressTimeoutMs = timeoutSeconds * 1000;
+
+  // 排队中的请求各自持有最多 maxFileSizeMb 的缓冲，必须限流而不是无限排队
+  const maxInFlight =
+    options.maxInFlight ||
+    parseInt(process.env.SQUOOSH_MAX_INFLIGHT, 10) ||
+    workerCount * 2;
+  let inFlight = 0;
+
   const pool = new ImagePool(workerCount);
 
   const server = http.createServer((req, res) => {
@@ -61,6 +78,8 @@ function createServer(options = {}) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    // 直通路径会把任意字节按 application/octet-stream 回传，禁止浏览器嗅探类型
+    res.setHeader('X-Content-Type-Options', 'nosniff');
 
     if (req.method === 'OPTIONS') {
       res.statusCode = 204;
@@ -82,6 +101,9 @@ function createServer(options = {}) {
           uptime: process.uptime(),
           workers: workerCount,
           maxFileSizeMb,
+          inFlight,
+          maxInFlight,
+          timeoutSeconds,
           memoryUsage: process.memoryUsage(),
         }),
       );
@@ -137,6 +159,22 @@ function createServer(options = {}) {
       let filename = 'image';
       let fileTooLarge = false;
 
+      // 超限即刻回 413。Connection: close 让 Node 在响应刷完后关闭 socket；
+      // 绝不在响应之前 destroy 请求流——请求体未读完时 destroy 会让客户端只拿到 ECONNRESET
+      function respondTooLarge() {
+        if (res.headersSent) return;
+        res.statusCode = 413;
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Connection', 'close');
+        res.end(
+          JSON.stringify({
+            code: 'PAYLOAD_TOO_LARGE',
+            message: `File size exceeds the limit of ${maxFileSizeMb}MB`,
+          }),
+        );
+        logAccess(413, `File exceeds ${maxFileSizeMb}MB limit`);
+      }
+
       bb.on('field', (name, val) => {
         fields[name] = val;
       });
@@ -150,6 +188,7 @@ function createServer(options = {}) {
           totalBytes += chunk.length;
           if (totalBytes > maxFileSizeBytes) {
             fileTooLarge = true;
+            respondTooLarge();
             fileStream.resume(); // 丢弃后续流
             return;
           }
@@ -158,6 +197,7 @@ function createServer(options = {}) {
 
         fileStream.on('limit', () => {
           fileTooLarge = true;
+          respondTooLarge();
         });
 
         fileStream.on('end', () => {
@@ -185,19 +225,7 @@ function createServer(options = {}) {
         if (res.headersSent) return;
 
         if (fileTooLarge) {
-          // 强行销毁请求流，防止客户端继续发送剩余大文件导致管道卡死
-          req.unpipe(bb);
-          if (!req.destroyed) req.destroy();
-
-          res.statusCode = 413;
-          res.setHeader('Content-Type', 'application/json; charset=utf-8');
-          res.end(
-            JSON.stringify({
-              code: 'PAYLOAD_TOO_LARGE',
-              message: `File size exceeds the limit of ${maxFileSizeMb}MB`,
-            }),
-          );
-          logAccess(413, `File exceeds ${maxFileSizeMb}MB limit`);
+          respondTooLarge();
           return;
         }
 
@@ -216,13 +244,27 @@ function createServer(options = {}) {
 
         const mode = fields.mode || 'auto';
         const type = fields.type || '';
-        const quality = fields.quality
-          ? parseInt(fields.quality, 10)
-          : undefined;
+        // quality 必须是 1-100 的整数，否则回落编码器默认值；NaN 直接进编码器会产出不可用的小图
+        const rawQuality = Number(fields.quality);
+        const quality =
+          Number.isInteger(rawQuality) && rawQuality >= 1 && rawQuality <= 100
+            ? rawQuality
+            : undefined;
 
-        // 设置压缩超时（默认 30 秒）
-        const compressTimeout =
-          parseInt(process.env.SQUOOSH_TIMEOUT || '30', 10) * 1000;
+        // 并发闸门：池的 jobQueue 无界，超限直接拒绝，避免排队缓冲把内存吃穿
+        if (inFlight >= maxInFlight) {
+          res.statusCode = 429;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.setHeader('Retry-After', '5');
+          res.end(
+            JSON.stringify({
+              code: 'TOO_MANY_REQUESTS',
+              message: `Concurrency limit reached (${maxInFlight})`,
+            }),
+          );
+          logAccess(429, `并发超限 ${inFlight}/${maxInFlight}`);
+          return;
+        }
 
         const compressPromise = compressImage(pool, fileBuffer, {
           mode,
@@ -230,11 +272,19 @@ function createServer(options = {}) {
           quality,
         });
 
+        // 槽位在压缩任务真正结束时释放：超时后任务仍会在池里跑完，不能提前放行
+        inFlight += 1;
+        const releaseSlot = () => {
+          inFlight -= 1;
+        };
+        compressPromise.then(releaseSlot, releaseSlot);
+
         let timeoutId;
         const timeoutPromise = new Promise((_, reject) => {
           timeoutId = setTimeout(
-            () => reject(new Error(`压缩超时 (${compressTimeout / 1000}s)`)),
-            compressTimeout,
+            () =>
+              reject(new CompressTimeoutError(`压缩超时 (${timeoutSeconds}s)`)),
+            compressTimeoutMs,
           );
         });
 
@@ -288,21 +338,10 @@ function createServer(options = {}) {
           }
         } catch (err) {
           clearTimeout(timeoutId); // ✅ 失败/超时路径：同样清除定时器
-          const isTimeout = err.message && err.message.includes('压缩超时');
+          const isTimeout = err instanceof CompressTimeoutError;
 
-          if (isTimeout) {
-            // 后台幽灵任务静默兜底
-            compressPromise
-              .then((res) => {
-                if (res && res.data) res.data = null;
-              })
-              .catch((bgErr) => {
-                console.warn(
-                  '[squoosh-api] 超时后台任务最终异常退出:',
-                  bgErr.message,
-                );
-              });
-          }
+          // 超时后压缩任务仍会在池里跑完，其 rejection 已由 releaseSlot 分支接住，
+          // 这里无需再做兜底（清空 result.data 对 WASM 内存毫无作用）
 
           console.error('处理图片请求异常:', err);
           if (!res.headersSent) {

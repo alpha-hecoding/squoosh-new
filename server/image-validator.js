@@ -5,8 +5,16 @@
  * 在进入 WASM 编解码前检测已知问题，防止卡死或内存溢出 (OOM)
  */
 
-const MAX_MEGAPIXELS = 100;
-const MAX_16BIT_PNG_MEGAPIXELS = 50;
+// 解码后 RGBA 约 4 字节/像素，100MP 单图即 ~400MB。默认保持 100MP，
+// 并发压力大时可用 SQUOOSH_MAX_MEGAPIXELS 下调。
+const MAX_MEGAPIXELS = (() => {
+  const fromEnv = Number(process.env.SQUOOSH_MAX_MEGAPIXELS);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 100;
+})();
+const MAX_16BIT_PNG_MEGAPIXELS = MAX_MEGAPIXELS / 2;
+
+// JPEG 结束标记；熵数据内 0xFF 后必跟 0x00 填充，因此首个 0xFFD9 即真正的 EOI
+const EOI_MARKER = Buffer.from([0xff, 0xd9]);
 
 /**
  * 校验结果
@@ -36,6 +44,8 @@ function validateJpeg(buffer) {
 
   let offset = 2;
   let hasSOF = false;
+  let sawEoi = false;
+  let entropyStart = -1;
   let width = 0;
   let height = 0;
   let numComponents = 0;
@@ -43,6 +53,7 @@ function validateJpeg(buffer) {
   while (offset < buffer.length - 1) {
     // 非 0xFF 开头说明头部扫描异常或已进入非预期数据流
     if (buffer[offset] !== 0xff) {
+      entropyStart = offset;
       break;
     }
 
@@ -64,8 +75,15 @@ function validateJpeg(buffer) {
       continue;
     }
 
-    // 3. EOI (0xD9, 图像结束) 或 SOS (0xDA, 扫描线压缩数据开始) -> 停止扫描头部
-    if (marker === 0xd9 || marker === 0xda) {
+    // 3. EOI (0xD9, 图像结束) -> 头部扫描正常结束
+    if (marker === 0xd9) {
+      sawEoi = true;
+      break;
+    }
+
+    // SOS (0xDA, 扫描线压缩数据开始) -> 记录熵数据起点后停止扫描头部
+    if (marker === 0xda) {
+      entropyStart = offset + 2;
       break;
     }
 
@@ -144,6 +162,18 @@ function validateJpeg(buffer) {
     }
 
     offset += 2 + segmentLength;
+  }
+
+  // 7. 熵数据完整性：合法 JPEG 必须以 EOI 收尾，否则文件被截断，解码只会产出残缺图
+  if (!sawEoi && entropyStart >= 0) {
+    sawEoi = buffer.indexOf(EOI_MARKER, entropyStart) !== -1;
+  }
+  if (!sawEoi) {
+    return {
+      valid: false,
+      reason: 'JPEG 数据流被截断（缺少 EOI 结束标记）',
+      info,
+    };
   }
 
   if (!hasSOF) {

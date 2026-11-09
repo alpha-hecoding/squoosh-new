@@ -110,6 +110,27 @@ async function runTests() {
     assert.deepStrictEqual(resCorrupt.data, corruptJpg);
     console.log('  损坏图片异常降级直通通过');
 
+    // 2.6 AVIF 输入不能被前置校验拦死：必须走到编解码器，再由异常兜底直通
+    const fakeAvif = Buffer.concat([
+      Buffer.alloc(4),
+      Buffer.from('ftyp', 'ascii'),
+      Buffer.from('avif', 'ascii'),
+      Buffer.alloc(4),
+      Buffer.from('mif1', 'ascii'),
+    ]);
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    const resAvif = await compressImage(pool, fakeAvif, { mode: 'auto' });
+    console.warn = originalWarn;
+    assert.strictEqual(resAvif.ext, 'avif');
+    assert.strictEqual(resAvif.bypassed, true);
+    assert.ok(
+      !warnings.some((msg) => msg.includes('图片校验未通过')),
+      'AVIF 不应被前置校验直接拦死',
+    );
+    console.log('  AVIF 进入编解码分支后异常降级直通通过');
+
     console.log('--- 全部 compressor 测试通过 ---');
   } finally {
     await pool.close();

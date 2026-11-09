@@ -13,8 +13,11 @@ test/
 ├── e2e-api.sh                     # 端到端集成测试
 ├── generate-extra-test-images.sh  # 生成额外测试图片
 ├── test-batch-compress.sh         # 批量压缩测试
-└── test-images/                   # 测试图片目录（31个文件）
+└── test-images/                   # 测试图片目录（被 gitignore，由生成脚本产出）
 ```
+
+`test-images/` 与 `test-output/` 都在 `.gitignore` 内，全新 clone 后目录是空的，
+必须先执行 `./test/generate-extra-test-images.sh` 才能跑批量测试。
 
 ## 单元测试
 
@@ -87,7 +90,7 @@ docker rm -f squoosh-test
 - **特殊格式**: 渐进式 JPEG、灰度图、透明 PNG、16-bit PNG
 - **边缘情况**: CMYK JPEG、动画 GIF、BMP、TIFF、ICO
 - **损坏文件**: 截断 JPEG、无效 JPEG 头、假图片文件
-- **大文件**: 25MP 大图（接近 100MP 限制）
+- **大文件**: 25MP 大图（应正常压缩）、110MP 大图（应被 100MP 上限拦下直通）
 - **特殊属性**: 带 ICC Profile、带 EXIF、索引色
 
 ## 批量压缩测试
@@ -103,6 +106,9 @@ docker rm -f squoosh-test
 # 测试 jpeg 模式
 ./test/test-batch-compress.sh http://localhost:8081/api/compress jpeg
 ```
+
+curl 的 `--max-time` 默认 45s，必须大于服务端压缩超时（`SQUOOSH_TIMEOUT`，默认 30s），
+否则客户端会先超时拿到 `000` 而不是 504。可用 `CURL_MAX_TIME=60` 覆盖。
 
 输出示例：
 
@@ -122,9 +128,10 @@ API URL: http://localhost:8081/api/compress
 ...
 
 === 测试完成 ===
-总计: 31 个文件
-成功: 23
-直通: 8
+总计: 32 个文件
+成功: 22
+直通: 9
+过大: 0
 失败: 0
 
 ✅ 所有文件处理成功
@@ -132,25 +139,38 @@ API URL: http://localhost:8081/api/compress
 
 ## 测试图片说明
 
-test-images 目录包含 31 个测试文件，覆盖以下场景：
+`generate-extra-test-images.sh` 会生成 32 个测试文件，覆盖以下场景：
 
-| 文件                  | 格式           | 预期行为 |
-| --------------------- | -------------- | -------- |
-| standard.jpg/png/webp | 标准格式       | 成功压缩 |
-| jpeg_q\*.jpg          | 不同质量 JPEG  | 成功压缩 |
-| progressive.jpg       | 渐进式 JPEG    | 成功压缩 |
-| png\__x_.png          | 不同尺寸 PNG   | 成功压缩 |
-| transparent.png       | 透明 PNG       | 成功压缩 |
-| 16bit.png             | 16-bit PNG     | 成功压缩 |
-| grayscale.\*          | 灰度图         | 成功压缩 |
-| large_25mp.jpg        | 25MP 大图      | 成功压缩 |
-| animated.gif          | 动画 GIF       | 直通     |
-| cmyk.jpg              | CMYK JPEG      | 直通     |
-| arithmetic.jpg        | 算术编码 JPEG  | 直通     |
-| test.bmp/tiff/ico     | 不支持格式     | 直通     |
-| corrupted\_\*.jpg     | 损坏文件       | 直通     |
-| fake_image.jpg        | 假图片         | 直通     |
-| with_icc.jpg          | 带 ICC Profile | 成功压缩 |
+| 文件                    | 格式                | 预期行为                |
+| ----------------------- | ------------------- | ----------------------- |
+| standard.jpg/png/webp   | 标准格式            | 成功压缩                |
+| jpeg_q\*.jpg            | 不同质量 JPEG       | 成功压缩                |
+| progressive.jpg         | 渐进式 JPEG         | 成功压缩                |
+| png\__x_.png            | 不同尺寸 PNG        | 成功压缩                |
+| transparent.png         | 透明 PNG            | 成功压缩                |
+| 16bit.png               | 16-bit PNG          | 成功压缩                |
+| grayscale.\*            | 灰度图              | 成功压缩                |
+| large_25mp.jpg          | 25MP 大图           | 成功压缩                |
+| over_limit_110mp.jpg    | 110MP 大图          | 直通（超出 100MP 上限） |
+| animated.gif            | 动画 GIF            | 直通                    |
+| cmyk.jpg                | CMYK JPEG           | 直通                    |
+| arithmetic.jpg          | 算术编码 JPEG       | 直通                    |
+| test.bmp/tiff/ico       | 不支持格式          | 直通                    |
+| corrupted_truncated.jpg | 截断 JPEG（缺 EOI） | 直通                    |
+| corrupted_header.jpg    | 无效 JPEG 头        | 直通                    |
+| fake_image.jpg          | 假图片              | 直通                    |
+| with_icc.jpg            | 带 ICC Profile      | 成功压缩                |
+
+## 服务端可调参数
+
+| 环境变量                 | 默认值        | 作用                           |
+| ------------------------ | ------------- | ------------------------------ |
+| `SQUOOSH_TIMEOUT`        | 30（秒）      | 单次压缩超时，超时返回 504     |
+| `SQUOOSH_MAX_INFLIGHT`   | worker 数 × 2 | 并发闸门，超限返回 429         |
+| `SQUOOSH_MAX_MEGAPIXELS` | 100           | 解码前像素上限，超出直通原文件 |
+| `MAX_FILE_SIZE_MB`       | 50            | 上传体积上限，超出返回 413     |
+
+`quality` 表单字段只接受 1–100 的整数，非法值回落编码器默认 75。
 
 ## 测试流程
 
